@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 from collections import Counter
-from typing import Dict, List, Tuple, Any, Optional
 
 
 class DecisionNode:
@@ -20,10 +19,11 @@ class DecisionNode:
 class ID3NumericalClassifier:
     """ID3 Decision Tree with support for numerical attributes."""
 
-    def __init__(self, max_depth=None, min_samples_split=2):
+    def __init__(self, max_depth=None, min_samples_split=2, min_depth=2):
         self.root = None
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
+        self.min_depth = min_depth
         self.feature_types = {}  # Track if feature is numerical or categorical
 
     def entropy(self, y):
@@ -114,27 +114,44 @@ class ID3NumericalClassifier:
 
     def build_tree(self, X, y, attributes, depth=0):
         """Recursively build the decision tree."""
-        # Base cases
-        if len(set(y)) == 1:
+
+        # -------------------------------------------------------------
+        # Base case 1: pure node (all labels identical)
+        # BUT ONLY if we are already past min_depth
+        # -------------------------------------------------------------
+        if len(set(y)) == 1 and depth >= self.min_depth - 1:
             return DecisionNode(label=y[0])
 
-        if len(attributes) == 0 or len(y) < self.min_samples_split:
+        # -------------------------------------------------------------
+        # Base case 2: no more attributes or not enough samples
+        # BUT ONLY if depth >= min_depth-1
+        # -------------------------------------------------------------
+        if (len(attributes) == 0 or len(y) < self.min_samples_split) and depth >= self.min_depth - 1:
             return DecisionNode(label=Counter(y).most_common(1)[0][0])
 
+        # -------------------------------------------------------------
+        # Base case 3: reached max depth (if set)
+        # BUT ONLY if depth >= min_depth-1
+        # -------------------------------------------------------------
         if self.max_depth is not None and depth >= self.max_depth:
-            return DecisionNode(label=Counter(y).most_common(1)[0][0])
+            if depth >= self.min_depth - 1:
+                return DecisionNode(label=Counter(y).most_common(1)[0][0])
 
-        # Find best attribute to split on
+        # -------------------------------------------------------------
+        # Otherwise: we MUST continue splitting until depth >= min_depth-1
+        # -------------------------------------------------------------
+
         best_attr, threshold = self.best_attribute(X, y, attributes)
 
         if best_attr is None:
+            # No attribute available for split
             return DecisionNode(label=Counter(y).most_common(1)[0][0])
 
         # Create node
         node = DecisionNode(attribute=best_attr, threshold=threshold)
 
+        # Numerical split
         if self.feature_types[best_attr] == 'numerical':
-            # Binary split for numerical
             left_mask = X[:, best_attr] <= threshold
             right_mask = X[:, best_attr] > threshold
 
@@ -142,15 +159,14 @@ class ID3NumericalClassifier:
                 node.branches['<='] = self.build_tree(
                     X[left_mask], y[left_mask], attributes, depth + 1
                 )
-
             if sum(right_mask) > 0:
                 node.branches['>'] = self.build_tree(
                     X[right_mask], y[right_mask], attributes, depth + 1
                 )
-        else:
-            # Multi-way split for categorical
-            remaining_attrs = [a for a in attributes if a != best_attr]
 
+        else:
+            # Categorical split
+            remaining_attrs = [a for a in attributes if a != best_attr]
             for val in set(X[:, best_attr]):
                 mask = X[:, best_attr] == val
                 if sum(mask) > 0:
