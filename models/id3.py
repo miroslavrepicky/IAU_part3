@@ -4,7 +4,6 @@ from collections import Counter
 
 
 class DecisionNode:
-    """Represents a node in the decision tree."""
 
     def __init__(self, attribute=None, threshold=None, label=None, branches=None):
         self.attribute = attribute  # Feature to split on
@@ -16,322 +15,234 @@ class DecisionNode:
         return self.label is not None
 
 
-class ID3NumericalClassifier:
-    """ID3 Decision Tree with support for numerical attributes."""
+import numpy as np
+from collections import defaultdict, Counter
 
+class FastDecisionNode:
+    def __init__(self, attribute=None, threshold=None, label=None, left=None, right=None):
+        self.attribute = attribute
+        self.threshold = threshold
+        self.label = label
+        self.left = left
+        self.right = right
+
+    def is_leaf(self):
+        return self.label is not None
+
+
+class ID3NumericalClassifier:
     def __init__(self, max_depth=None, min_samples_split=2, min_depth=2):
-        self.root = None
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_depth = min_depth
-        self.feature_types = {}  # Track if feature is numerical or categorical
+        self.root = None
 
-    def entropy(self, y):
-        """Calculate entropy of a label array."""
-        if len(y) == 0:
-            return 0
-        counts = Counter(y)
-        probs = [count / len(y) for count in counts.values()]
-        return -sum(p * np.log2(p) for p in probs if p > 0)
+    # ---------------------------
+    # Utilities: entropy + info
+    # ---------------------------
+    def _entropy_from_counts(self, counts):
+        # counts: array-like counts per class
+        total = counts.sum()
+        if total == 0:
+            return 0.0
+        probs = counts / total
+        # only non-zero probs
+        nz = probs > 0
+        return -np.sum(probs[nz] * np.log2(probs[nz]))
 
-    def find_best_threshold(self, X_col, y):
-        """Find the best threshold for a numerical attribute."""
-        # Sort unique values
-        sorted_vals = sorted(set(X_col))
+    # ---------------------------
+    # Fit
+    # ---------------------------
+    def fit(self, X, y):
+        X = np.asarray(X)
+        y = np.asarray(y)
 
-        if len(sorted_vals) <= 1:
-            return None, -np.inf
+        n_samples, n_features = X.shape
 
-        # Try midpoints between consecutive values
-        best_threshold = None
-        best_gain = -np.inf
+        # encode labels to 0..K-1 for fast counts
+        classes, y_encoded = np.unique(y, return_inverse=True)
+        self.classes_ = classes
+        self.n_classes_ = len(classes)
+        self.y_encoded = y_encoded  # in original order
+        self.n_samples_ = n_samples
 
-        for i in range(len(sorted_vals) - 1):
-            threshold = (sorted_vals[i] + sorted_vals[i + 1]) / 2
+        # precompute argsort for each feature and the sorted values
+        self.sorted_idx = [np.argsort(X[:, j], kind='mergesort') for j in range(n_features)]
+        self.sorted_vals = [X[self.sorted_idx[j], j] for j in range(n_features)]
 
-            # Split data
-            left_mask = X_col <= threshold
-            right_mask = X_col > threshold
+        # store X for predict
+        self.X_ = X
 
-            if sum(left_mask) == 0 or sum(right_mask) == 0:
-                continue
-
-            # Calculate information gain
-            parent_entropy = self.entropy(y)
-            n = len(y)
-            n_left = sum(left_mask)
-            n_right = sum(right_mask)
-
-            left_entropy = self.entropy(y[left_mask])
-            right_entropy = self.entropy(y[right_mask])
-
-            weighted_entropy = (n_left / n) * left_entropy + (n_right / n) * right_entropy
-            gain = parent_entropy - weighted_entropy
-
-            if gain > best_gain:
-                best_gain = gain
-                best_threshold = threshold
-
-        return best_threshold, best_gain
-
-    def information_gain_categorical(self, X_col, y):
-        """Calculate information gain for categorical attribute."""
-        parent_entropy = self.entropy(y)
-        n = len(y)
-
-        # Calculate weighted entropy for each value
-        weighted_entropy = 0
-        for val in set(X_col):
-            mask = X_col == val
-            subset_y = y[mask]
-            weighted_entropy += (len(subset_y) / n) * self.entropy(subset_y)
-
-        return parent_entropy - weighted_entropy
-
-    def best_attribute(self, X, y, attributes):
-        """Find the best attribute to split on."""
-        best_attr = None
-        best_gain = -np.inf
-        best_threshold = None
-
-        for attr in attributes:
-            X_col = X[:, attr]
-
-            if self.feature_types[attr] == 'numerical':
-                threshold, gain = self.find_best_threshold(X_col, y)
-                if gain > best_gain:
-                    best_gain = gain
-                    best_attr = attr
-                    best_threshold = threshold
-            else:  # categorical
-                gain = self.information_gain_categorical(X_col, y)
-                if gain > best_gain:
-                    best_gain = gain
-                    best_attr = attr
-                    best_threshold = None
-
-        return best_attr, best_threshold
-
-    def build_tree(self, X, y, attributes, depth=0):
-        """Recursively build the decision tree."""
-
-        # -------------------------------------------------------------
-        # Base case 1: pure node (all labels identical)
-        # BUT ONLY if we are already past min_depth
-        # -------------------------------------------------------------
-        if len(set(y)) == 1 and depth >= self.min_depth - 1:
-            return DecisionNode(label=y[0])
-
-        # -------------------------------------------------------------
-        # Base case 2: no more attributes or not enough samples
-        # BUT ONLY if depth >= min_depth-1
-        # -------------------------------------------------------------
-        if (len(attributes) == 0 or len(y) < self.min_samples_split) and depth >= self.min_depth - 1:
-            return DecisionNode(label=Counter(y).most_common(1)[0][0])
-
-        # -------------------------------------------------------------
-        # Base case 3: reached max depth (if set)
-        # BUT ONLY if depth >= min_depth-1
-        # -------------------------------------------------------------
-        if self.max_depth is not None and depth >= self.max_depth:
-            if depth >= self.min_depth - 1:
-                return DecisionNode(label=Counter(y).most_common(1)[0][0])
-
-        # -------------------------------------------------------------
-        # Otherwise: we MUST continue splitting until depth >= min_depth-1
-        # -------------------------------------------------------------
-
-        best_attr, threshold = self.best_attribute(X, y, attributes)
-
-        if best_attr is None:
-            # No attribute available for split
-            return DecisionNode(label=Counter(y).most_common(1)[0][0])
-
-        # Create node
-        node = DecisionNode(attribute=best_attr, threshold=threshold)
-
-        # Numerical split
-        if self.feature_types[best_attr] == 'numerical':
-            left_mask = X[:, best_attr] <= threshold
-            right_mask = X[:, best_attr] > threshold
-
-            if sum(left_mask) > 0:
-                node.branches['<='] = self.build_tree(
-                    X[left_mask], y[left_mask], attributes, depth + 1
-                )
-            if sum(right_mask) > 0:
-                node.branches['>'] = self.build_tree(
-                    X[right_mask], y[right_mask], attributes, depth + 1
-                )
-
-        else:
-            # Categorical split
-            remaining_attrs = [a for a in attributes if a != best_attr]
-            for val in set(X[:, best_attr]):
-                mask = X[:, best_attr] == val
-                if sum(mask) > 0:
-                    node.branches[val] = self.build_tree(
-                        X[mask], y[mask], remaining_attrs, depth + 1
-                    )
-
-        return node
-
-    def fit(self, X, y, feature_types=None):
-        """
-        Train the decision tree.
-
-        Parameters:
-        -----------
-        X : array-like or DataFrame
-            Training features
-        y : array-like
-            Target labels
-        feature_types : dict, optional
-            Dictionary mapping feature indices to 'numerical' or 'categorical'
-            If None, all features are assumed to be numerical
-        """
-        if isinstance(X, pd.DataFrame):
-            X = X.values
-        if isinstance(y, pd.Series):
-            y = y.values
-
-        X = np.array(X)
-        y = np.array(y)
-
-        # Determine feature types
-        if feature_types is None:
-            self.feature_types = {i: 'numerical' for i in range(X.shape[1])}
-        else:
-            self.feature_types = feature_types
-
-        attributes = list(range(X.shape[1]))
-        self.root = self.build_tree(X, y, attributes)
+        # build tree starting with all indices
+        all_idx = np.arange(n_samples, dtype=int)
+        self.root = self._build_tree(all_idx, depth=0)
         return self
 
-    def predict_single(self, x, node):
-        """Predict a single sample."""
-        if node.is_leaf():
-            return node.label
+    # ---------------------------
+    # Find best split for a node
+    # ---------------------------
+    def _best_split_for_node(self, indices):
+        if indices.size == 0:
+            return None, None, -np.inf
 
-        attr_val = x[node.attribute]
+        # parent counts and entropy
+        parent_counts = np.bincount(self.y_encoded[indices], minlength=self.n_classes_)
+        parent_entropy = self._entropy_from_counts(parent_counts)
+        n = indices.size
 
-        if self.feature_types[node.attribute] == 'numerical':
-            if attr_val <= node.threshold:
-                branch = node.branches.get('<=')
+        best_gain = -np.inf
+        best_attr = None
+        best_threshold = None
+
+        # boolean mask marking samples in this node for O(1) membership test
+        node_mask = np.zeros(self.n_samples_, dtype=bool)
+        node_mask[indices] = True
+
+        # for each feature, scan the pre-sorted order and accumulate prefix counts
+        for j, sorted_idx_j in enumerate(self.sorted_idx):
+            sorted_vals_j = self.sorted_vals[j]
+
+            # We'll iterate sorted indices and only process those that are in the node
+            left_counts = np.zeros(self.n_classes_, dtype=int)
+            left_n = 0
+
+            last_val = None
+            last_processed = False
+
+
+            for pos_in_sorted, sample_idx in enumerate(sorted_idx_j):
+                if not node_mask[sample_idx]:
+                    continue
+
+                lbl = self.y_encoded[sample_idx]
+                left_counts[lbl] += 1
+                left_n += 1
+
+                val = sorted_vals_j[pos_in_sorted]
+
+                k = pos_in_sorted + 1
+                next_in_node_val = None
+                while k < len(sorted_idx_j):
+                    idx_k = sorted_idx_j[k]
+                    if node_mask[idx_k]:
+                        next_in_node_val = sorted_vals_j[k]
+                        break
+                    k += 1
+
+                # If next_in_node_val is None -> no further in-node samples => cannot split after last sample
+                if next_in_node_val is None:
+                    continue
+
+                if next_in_node_val == val:
+                    # same numeric value for next in-node sample -> don't split here
+                    continue
+
+                # Now we have a valid boundary between val and next_in_node_val
+                right_n = n - left_n
+                if left_n < self.min_samples_split or right_n < self.min_samples_split:
+                    continue
+
+                # compute entropies from counts
+                right_counts = parent_counts - left_counts
+                left_entropy = self._entropy_from_counts(left_counts)
+                right_entropy = self._entropy_from_counts(right_counts)
+                weighted_entropy = (left_n / n) * left_entropy + (right_n / n) * right_entropy
+                gain = parent_entropy - weighted_entropy
+
+                if gain > best_gain:
+                    best_gain = gain
+                    best_attr = j
+                    # threshold taken as midpoint between val and next_in_node_val
+                    best_threshold = 0.5 * (val + next_in_node_val)
+
+            # finished scanning this feature
+        return best_attr, best_threshold, best_gain
+
+    # ---------------------------
+    # Build tree recursively
+    # ---------------------------
+    def _build_tree(self, indices, depth=0):
+        # If pure and depth >= min_depth-1 -> leaf
+        labels_here = self.y_encoded[indices]
+        if labels_here.size == 0:
+            # empty node, shouldn't happen often
+            return FastDecisionNode(label=None)
+
+        # majority label
+        counts = np.bincount(labels_here, minlength=self.n_classes_)
+        majority_label = int(np.argmax(counts))
+
+        # stop conditions: pure & depth >= min_depth-1
+        if depth >= (self.min_depth - 1) and np.all(labels_here == labels_here[0]):
+            return FastDecisionNode(label=majority_label)
+
+        # stop if not enough samples
+        if depth >= (self.min_depth - 1) and indices.size < self.min_samples_split:
+            return FastDecisionNode(label=majority_label)
+
+        # stop if reached max depth (if set)
+        if self.max_depth is not None and depth >= self.max_depth:
+            if depth >= (self.min_depth - 1):
+                return FastDecisionNode(label=majority_label)
+
+        # find best split
+        best_attr, best_threshold, best_gain = self._best_split_for_node(indices)
+
+        if best_attr is None or best_gain <= 0:
+            return FastDecisionNode(label=majority_label)
+
+        # partition indices into left and right using threshold (no copy of X, just boolean division)
+        # left: X[:, best_attr] <= threshold
+        col_vals = self.X_[indices, best_attr]
+        left_mask = col_vals <= best_threshold
+        left_idx = indices[left_mask]
+        right_idx = indices[~left_mask]
+
+        # safety: if one side empty -> make leaf
+        if left_idx.size == 0 or right_idx.size == 0:
+            return FastDecisionNode(label=majority_label)
+
+        # recursive calls
+        left_node = self._build_tree(left_idx, depth + 1)
+        right_node = self._build_tree(right_idx, depth + 1)
+
+        return FastDecisionNode(attribute=best_attr, threshold=best_threshold, left=left_node, right=right_node)
+
+    # ---------------------------
+    # Predict
+    # ---------------------------
+    def _predict_one(self, x, node):
+        while not node.is_leaf():
+            if x[node.attribute] <= node.threshold:
+                node = node.left
             else:
-                branch = node.branches.get('>')
-        else:
-            branch = node.branches.get(attr_val)
-
-        if branch is None:
-            # If branch doesn't exist, return most common label in current node
-            return self._most_common_label(node)
-
-        return self.predict_single(x, branch)
-
-    def _most_common_label(self, node):
-        """Find most common label in subtree."""
-        if node.is_leaf():
-            return node.label
-
-        labels = []
-        for branch in node.branches.values():
-            labels.append(self._most_common_label(branch))
-
-        return Counter(labels).most_common(1)[0][0]
+                node = node.right
+        return node.label
 
     def predict(self, X):
-        """Predict labels for samples."""
-        if isinstance(X, pd.DataFrame):
-            X = X.values
-        X = np.array(X)
+        X = np.asarray(X)
+        preds = np.array([self._predict_one(x, self.root) for x in X], dtype=int)
+        # decode labels back to original
+        return self.classes_[preds]
 
-        return np.array([self.predict_single(x, self.root) for x in X])
-
-    def print_tree(self, node=None, depth=0, prefix="Root"):
-        """Print the tree structure."""
-        if node is None:
-            node = self.root
-
+    # ---------------------------
+    # Print tree for debug
+    # ---------------------------
+    def _print_node(self, node, depth=0, prefix="Root"):
         indent = "  " * depth
-
         if node.is_leaf():
-            print(f"{indent}{prefix} -> Leaf: {node.label}")
+            label = self.classes_[node.label] if node.label is not None else None
+            print(f"{indent}{prefix} -> Leaf: {label}")
         else:
-            attr = node.attribute
-            if self.feature_types[attr] == 'numerical':
-                print(f"{indent}{prefix} -> Feature {attr} (threshold: {node.threshold:.3f})")
-                if '<=' in node.branches:
-                    self.print_tree(node.branches['<='], depth + 1, f"<= {node.threshold:.3f}")
-                if '>' in node.branches:
-                    self.print_tree(node.branches['>'], depth + 1, f"> {node.threshold:.3f}")
-            else:
-                print(f"{indent}{prefix} -> Feature {attr} (categorical)")
-                for val, branch in node.branches.items():
-                    self.print_tree(branch, depth + 1, f"= {val}")
+            print(f"{indent}{prefix} -> Feature {node.attribute} <= {node.threshold:.6f}")
+            self._print_node(node.left, depth + 1, prefix=f"<= {node.threshold:.6f}")
+            self._print_node(node.right, depth + 1, prefix=f"> {node.threshold:.6f}")
+
+    def print_tree(self):
+        if self.root is None:
+            print("Tree is empty")
+        else:
+            self._print_node(self.root)
 
 
-# Example usage
-if __name__ == "__main__":
-    # Example 1: All numerical features
-    print("=" * 50)
-    print("Example 1: Numerical Features (Iris-like dataset)")
-    print("=" * 50)
 
-    from sklearn.datasets import load_iris
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import accuracy_score, classification_report
-
-    iris = load_iris()
-    X_train, X_test, y_train, y_test = train_test_split(
-        iris.data, iris.target, test_size=0.3, random_state=42
-    )
-
-    # Train model
-    clf = ID3NumericalClassifier(max_depth=5)
-    clf.fit(X_train, y_train)
-
-    # Predict
-    y_pred = clf.predict(X_test)
-
-    print(f"\nAccuracy: {accuracy_score(y_test, y_pred):.3f}")
-    print("\nTree Structure:")
-    clf.print_tree()
-
-    # Example 2: Mixed features (numerical + categorical)
-    print("\n" + "=" * 50)
-    print("Example 2: Mixed Features (Numerical + Categorical)")
-    print("=" * 50)
-
-    # Create sample data
-    data = pd.DataFrame({
-        'age': [25, 30, 45, 35, 50, 23, 40, 60, 48, 33],
-        'income': [50000, 60000, 80000, 70000, 120000, 35000, 75000, 90000, 110000, 65000],
-        'education': ['BS', 'MS', 'PhD', 'BS', 'PhD', 'HS', 'MS', 'PhD', 'MS', 'BS'],
-        'buy': ['no', 'no', 'yes', 'yes', 'yes', 'no', 'yes', 'yes', 'yes', 'no']
-    })
-
-    # Prepare data
-    X = data[['age', 'income', 'education']].values
-    y = data['buy'].values
-
-    # Specify feature types (0: numerical, 1: numerical, 2: categorical)
-    feature_types = {0: 'numerical', 1: 'numerical', 2: 'categorical'}
-
-    clf2 = ID3NumericalClassifier(max_depth=3)
-    clf2.fit(X, y, feature_types=feature_types)
-
-    print("\nTree Structure:")
-    clf2.print_tree()
-
-    # Make predictions
-    test_samples = np.array([
-        [28, 55000, 'BS'],
-        [55, 95000, 'PhD'],
-        [24, 40000, 'HS']
-    ])
-
-    predictions = clf2.predict(test_samples)
-    print("\nPredictions for test samples:")
-    for i, (sample, pred) in enumerate(zip(test_samples, predictions)):
-        print(f"Sample {i + 1}: age={sample[0]}, income={sample[1]}, education={sample[2]} -> {pred}")
